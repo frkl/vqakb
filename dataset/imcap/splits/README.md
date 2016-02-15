@@ -1,0 +1,1 @@
+Splits by Andrej Karpathy http://cs.stanford.edu/people/karpathy/deepimagesent/ and Jamie Ryan Kiros https://github.com/ryankiros/visual-semantic-embedding

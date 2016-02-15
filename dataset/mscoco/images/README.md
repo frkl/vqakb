@@ -1,0 +1,1 @@
+MSCOCO images goes here. http://mscoco.org/

@@ -1,0 +1,1 @@
+MSCOCO annotations goes here. http://mscoco.org/

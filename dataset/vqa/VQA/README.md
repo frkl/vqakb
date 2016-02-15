@@ -1,0 +1,1 @@
+VQA dataset goes here. Checkout https://github.com/VT-vision-lab/VQA and download questions and annotations in Questions/ and Annotations/.

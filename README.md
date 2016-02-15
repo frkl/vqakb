@@ -8,7 +8,7 @@
 
 The code is written in Python and Torch. You'll need to install and configure the following packages.
 
-* Python (=2.7)
+* Python (==2.7)
 	* NLTK for tokenization
 	* json
 	* re
@@ -31,4 +31,4 @@ The code is loosely organized as utility libraries for
 * Extracting image and caption representations as VQA predictions or fc7 activations.
 * Training image-caption ranking models with feature fusion.
 
-A more detailed description will be available soon. 
+A more detailed description will be available soon<sup>TM</sup>. 
