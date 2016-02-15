@@ -31,4 +31,4 @@ The code is loosely organized as utility libraries for
 * Extracting image and caption representations as VQA predictions or fc7 activations.
 * Training image-caption ranking models with feature fusion.
 
-A more detailed description will be available soon<sup>TM</sup>. 
+A more detailed description will be available soon<sup>TM</sup>.

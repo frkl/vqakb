@@ -160,4 +160,4 @@ data_test['answer_dictionary']=answer_dictionary;
 
 
 torch.save('dataset_train.t7',data_train);
-torch.save('dataset_test.t7',data_test);
+torch.save('dataset_val.t7',data_test);

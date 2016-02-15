@@ -5,7 +5,7 @@ cmd:option('-data','../dataset/capqa/dataset_train.t7','Dataset for training');
 cmd:option('-model','model/lstm_bow.t7','Model filename');
 cmd:text();
 cmd:option('-nhword',200,'Word embedding size');
-cmd:option('-nh',500,'RNN size');
+cmd:option('-nh',512,'RNN size');
 cmd:option('-nlayers',2,'RNN layers');
 cmd:option('-nhcommon',1024,'Common embedding size');
 cmd:option('-top',1000,'Bag of top N words');

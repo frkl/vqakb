@@ -5,7 +5,7 @@ cmd:option('-data','../dataset/imqa/dataset_train.t7','Dataset for training');
 cmd:option('-model','model/lstm.t7','Model filename');
 cmd:text();
 cmd:option('-nhword',200,'Word embedding size');
-cmd:option('-nh',500,'RNN size');
+cmd:option('-nh',512,'RNN size');
 cmd:option('-nlayers',2,'RNN layers');
 cmd:option('-nhcommon',1024,'Common embedding size');
 cmd:text();
