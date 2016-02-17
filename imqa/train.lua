@@ -37,7 +37,6 @@ require 'nn'
 require 'cutorch'
 require 'cunn'
 require 'nngraph'
-require 'optim'
 require '../utils/optim_updates'
 require '../utils/RNNUtils'
 LSTM=require('../utils/LSTM');
