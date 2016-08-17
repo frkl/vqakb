@@ -1,7 +1,6 @@
---Join QAs with captions for train/val
+--Join QAs with images for train/val
 cmd = torch.CmdLine();
-cmd:text('Combine QA with captions to create a dataset');
-cmd:text('using the 19-layer VGG net in caffe model zoo');
+cmd:text('Combine QA with images to create a dataset');
 cmd:text('Options')
 cmd:option('-question','../vqa/train.json','JSON of tokenized questions with answers');
 cmd:option('-image','../mscoco/mscoco_vgg19_center.t7','t7 of image features');
@@ -25,7 +24,7 @@ end
 images=torch.load(params.image);
 questions=loadJson(params.question);
 
---Add a lookup table for captions
+--Add a lookup table for images
 images.lookup={};
 for i=1,#images.imname do
 	images.lookup[images.imname[i]]=i;

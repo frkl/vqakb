@@ -1,7 +1,6 @@
 --Join QAs with captions for train/val
 cmd = torch.CmdLine();
 cmd:text('Combine QA with captions to create a dataset');
-cmd:text('using the 19-layer VGG net in caffe model zoo');
 cmd:text('Options')
 cmd:option('-question','../vqa/train.json','JSON of tokenized questions with answers');
 cmd:option('-caption','../mscoco/captions.json','JSON of tokenized captions');
