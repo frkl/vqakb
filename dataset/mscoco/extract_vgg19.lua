@@ -2,78 +2,60 @@ cmd = torch.CmdLine();
 cmd:text('Extract features from a list of images');
 cmd:text('using the 19-layer VGG net in caffe model zoo');
 cmd:text('Options')
-cmd:option('-pretrain','../../pretrain/vgg_ilsvrc_19_layers/','Folder that has the pretrained model VGG_ILSVRC_19_layers.caffemodel and VGG_ILSVRC_19_layers_deploy.prototxt');
-cmd:option('-images','ims.json','A json file specifying a list of images');
-cmd:option('-path','./','Path prefix of images');
-cmd:option('-output','image_fvs.t7','Output file');
-cmd:option('-batch',8,'Batch size, adjust according to GRAM');
-cmd:text('Advanced');
-cmd:option('-dropout',false,'Turn on dropout');
-cmd:option('-nrepeat',0,'Repeat feature extraction N times. 0=off');
-cmd:option('-mode','center','"center" for center crop; "average" for average over 10 crops; "10" for reporting all 10 crops.');
-cmd:option('-vt',false,'Internal GPULock.')
+cmd:option('-pretrain','vgg19_cudnn_deploy.t7','The pretrained fool-proof VGG model with integrated preprocessing');
+cmd:option('-ims','imnames.json','A json file specifying a list of images');
+cmd:option('-path','./images/','Path prefix of images');
+cmd:option('-output','mscoco_vgg19_center.t7','Output file');
+cmd:option('-batch',100,'Batch size, adjust according to GRAM');
 params=cmd:parse(arg);
 --print(params)
 
 
-
-path_to_vgg=params.pretrain;
-path_to_mscoco=params.path;
-batch_size=params.batch;
-f_imnames=params.images;
-nrepeat=params.nrepeat;
-
-ndims=4096;
+params.nhimage=4096;
 
 require 'nn'
-require 'cunn'
 require 'cutorch'
-require 'loadcaffe'
+require 'cunn'
+require 'cudnn'
+require 'nngraph'
 require 'image'
 
---GPU Lock
-if params.vt then
-	vtutils=require('vtutils');
-	id=vtutils.obtain_gpu_lock_id.get_id();
-	print(id);
-	cutorch.setDevice(id+1);
-end
-
-
+cjson=require('cjson');
 function readAll(file)
     local f = io.open(file, "r")
     local content = f:read("*all")
     f:close()
     return content
 end
-cjson=require('cjson');
 function loadJson(fname)
 	local t=readAll(fname)
 	return cjson.decode(t)
 end
 
-imnames=loadJson(f_imnames);
+print('Loading image list')
+imnames=loadJson(params.ims);
 --Find a unique list of images, and index everything.
-list_of_images={};
+imlookup={};
 for qid,im in pairs(imnames) do
-	list_of_images[im]=0;
+	imlookup[im]=0;
 end
-list_im_names={};
-for im,junk in pairs(list_of_images) do
-	table.insert(list_im_names,im);
+imnames={};
+for im,junk in pairs(imlookup) do
+	table.insert(imnames,im);
 end
-net=loadcaffe.load(path_to_vgg..'VGG_ILSVRC_19_layers_deploy.prototxt',path_to_vgg..'VGG_ILSVRC_19_layers.caffemodel','nn');
+for i=1,#imnames do
+	imlookup[imnames[i]]=i;
+end
 
-if params.dropout then
-	net:training();
-else
-	net:evaluate();
-end
+
+print('Loading model')
+net=torch.load(params.pretrain);
 net=net:cuda();
+net:evaluate();
 
 imloader={};
 function imloader:load(fname)
-	self.im="rip";
+	self.im=nil;
 	if not pcall(function () self.im=image.load(fname); end) then
 		if not pcall(function () self.im=image.loadPNG(fname); end) then
 			if not pcall(function () self.im=image.loadJPG(fname); end) then
@@ -86,15 +68,13 @@ function loadim(imname)
 	imloader:load(imname);
 	local im=imloader.im;
 	if im:size(1)==1 then
-		--Grayscale
-		local im2=torch.cat(im,im,1);
-		im2=torch.cat(im2,im,1);
-		im=im2;
+		--Grayscale image, replicate to get RGB
+		im=torch.repeatTensor(im,3,1,1);
 	elseif im:size(1)==4 then
-		--RGBA
+		--RGBA, crop for only RGB
 		im=im[{{1,3},{},{}}];
-	end
-	
+	end	
+	--Resize to 256x256
 	local h=im:size(2);
 	local w=im:size(3);
 	local newh,neww;
@@ -104,157 +84,32 @@ function loadim(imname)
 	else
 		newh=math.ceil((256/w*h)/2)*2;
 		neww=256;
-	end
-	
+	end	
 	im=image.scale(im,neww,newh);
-	--Change dynamic range to 0~255
-	im=im*255;
-	
-	--Convert to BGR and subtract mean--
-	local im2=im:clone();
-	im2[{{3},{},{}}]=im[{{1},{},{}}]-123.68;
-	im2[{{2},{},{}}]=im[{{2},{},{}}]-116.779;
-	im2[{{1},{},{}}]=im[{{3},{},{}}]-103.939;
-	
-	local im4;
-	if params.mode=='average' or params.mode=='10' then
-		--return 10 crops
-		im4=torch.DoubleTensor(10,3,224,224):fill(0);
-		im4[1]=im2[{{},{newh/2-111,newh/2+112},{neww/2-111,neww/2+112}}];
-		im4[2]=im2[{{},{newh/2-127,newh/2+96},{neww/2-127,neww/2+96}}];
-		im4[3]=im2[{{},{newh/2-127,newh/2+96},{neww/2-95,neww/2+128}}];
-		im4[4]=im2[{{},{newh/2-95,newh/2+128},{neww/2-127,neww/2+96}}];
-		im4[5]=im2[{{},{newh/2-95,newh/2+128},{neww/2-95,neww/2+128}}];
-		
-		im4[6]=image.hflip(im2[{{},{newh/2-111,newh/2+112},{neww/2-111,neww/2+112}}]);
-		im4[7]=image.hflip(im2[{{},{newh/2-127,newh/2+96},{neww/2-127,neww/2+96}}]);
-		im4[8]=image.hflip(im2[{{},{newh/2-127,newh/2+96},{neww/2-95,neww/2+128}}]);
-		im4[9]=image.hflip(im2[{{},{newh/2-95,newh/2+128},{neww/2-127,neww/2+96}}]);
-		im4[10]=image.hflip(im2[{{},{newh/2-95,newh/2+128},{neww/2-95,neww/2+128}}]);
-	else
-		--return center crop;
-		im4=im2[{{},{newh/2-111,newh/2+112},{neww/2-111,neww/2+112}}];
-	end
-	
-	return im4;
+	--Return center Crop
+	return im[{{},{newh/2-111,newh/2+112},{neww/2-111,neww/2+112}}]:clone();
 end
 
 
-sz=#list_im_names;
-print(string.format('Processing %d images...',sz));
+nim=#imnames;
+print(string.format('Processing %d images...',nim));
+fvs=torch.DoubleTensor(nim,params.nhimage):fill(0);
 local timer = torch.Timer();
-if params.mode=='center' and nrepeat==0 then
-	fvs_ims=torch.DoubleTensor(sz,ndims):fill(0);
-	for i=1,sz,batch_size do
-		print(string.format('%d/%d, time %f',i,sz,timer:time().real));
-		r=math.min(sz,i+batch_size-1);
-		ims=torch.CudaTensor(r-i+1,3,224,224);
-		for j=1,r-i+1 do
-			ims[j]=loadim(path_to_mscoco..list_im_names[i+j-1]):cuda();
-		end
-		net:forward(ims);
-		--fc7 in vgg19 seems to be layer 43.
-		local tmp=net.modules[43].output:double();
-		fvs_ims[{{i,r},{}}]=tmp;
-		collectgarbage();
+for i=1,nim,params.batch do
+	--Load a batch of images
+	r=math.min(nim,i+params.batch-1);
+	local ims=torch.DoubleTensor(r-i+1,3,224,224);
+	for j=1,r-i+1 do
+		ims[j]=loadim(params.path..imnames[i+j-1]);
 	end
-elseif params.mode=='center' and nrepeat>0 then
-	fvs_ims=torch.DoubleTensor(sz,nrepeat,ndims):fill(0);
-	for i=1,sz,batch_size do
-		print(string.format('%d/%d, time %f',i,sz,timer:time().real));
-		r=math.min(sz,i+batch_size-1);
-		ims=torch.CudaTensor(r-i+1,3,224,224);
-		for j=1,r-i+1 do
-			ims[j]=loadim(path_to_mscoco..list_im_names[i+j-1]):cuda();
-		end
-		for j=1,nrepeat do
-			net:forward(ims);
-			--fc7 in vgg19 seems to be layer 43.
-			local tmp=net.modules[43].output:double();
-			fvs_ims[{{i,r},j,{}}]=tmp;
-		end
-		collectgarbage();
-	end
-elseif params.mode=='average' and nrepeat==0 then
-	fvs_ims=torch.DoubleTensor(sz,ndims):fill(0);
-	for i=1,sz,batch_size do
-		print(string.format('%d/%d, time %f',i,sz,timer:time().real));
-		r=math.min(sz,i+batch_size-1);
-		ims=torch.CudaTensor(r-i+1,10,3,224,224);
-		for j=1,r-i+1 do
-			ims[j]=loadim(path_to_mscoco..list_im_names[i+j-1]):cuda();
-		end
-		ims=torch.reshape(ims,(r-i+1)*10,3,224,224);
-		net:forward(ims);
-		--fc7 in vgg19 seems to be layer 43.
-		local tmp=net.modules[43].output:double();
-		tmp=torch.reshape(tmp,r-i+1,10,ndims);
-		tmp=torch.reshape(tmp:mean(2),r-i+1,ndims);
-		fvs_ims[{{i,r},{}}]=tmp;
-		collectgarbage();
-	end
-elseif params.mode=='average' and nrepeat>0 then
-	fvs_ims=torch.DoubleTensor(sz,nrepeat,ndims):fill(0);
-	for i=1,sz,batch_size do
-		print(string.format('%d/%d, time %f',i,sz,timer:time().real));
-		r=math.min(sz,i+batch_size-1);
-		ims=torch.CudaTensor(r-i+1,10,3,224,224);
-		for j=1,r-i+1 do
-			ims[j]=loadim(path_to_mscoco..list_im_names[i+j-1]):cuda();
-		end
-		ims=torch.reshape(ims,(r-i+1)*10,3,224,224);
-		for j=1,nrepeat do
-			net:forward(ims);
-			--fc7 in vgg19 seems to be layer 43.
-			local tmp=net.modules[43].output:double();
-			tmp=torch.reshape(tmp,r-i+1,10,ndims);
-			tmp=torch.reshape(tmp:mean(2),r-i+1,ndims);
-			fvs_ims[{{i,r},j,{}}]=tmp;
-		end
-		collectgarbage();
-	end
-elseif params.mode=='10' and nrepeat==0 then
-	fvs_ims=torch.DoubleTensor(sz,10,ndims):fill(0);
-	for i=1,sz,batch_size do
-		print(string.format('%d/%d, time %f',i,sz,timer:time().real));
-		r=math.min(sz,i+batch_size-1);
-		ims=torch.CudaTensor(r-i+1,10,3,224,224);
-		for j=1,r-i+1 do
-			ims[j]=loadim(path_to_mscoco..list_im_names[i+j-1]):cuda();
-		end
-		ims=torch.reshape(ims,(r-i+1)*10,3,224,224);
-		net:forward(ims);
-		--fc7 in vgg19 seems to be layer 43.
-		local tmp=net.modules[43].output:double();
-		tmp=torch.reshape(tmp,r-i+1,10,ndims);
-		fvs_ims[{{i,r},{},{}}]=tmp;
-		collectgarbage();
-	end
-elseif params.mode=='10' and nrepeat>0 then
-	fvs_ims=torch.DoubleTensor(sz,nrepeat,10,ndims):fill(0);
-	for i=1,sz,batch_size do
-		print(string.format('%d/%d, time %f',i,sz,timer:time().real));
-		r=math.min(sz,i+batch_size-1);
-		ims=torch.CudaTensor(r-i+1,10,3,224,224);
-		for j=1,r-i+1 do
-			ims[j]=loadim(path_to_mscoco..list_im_names[i+j-1]):cuda();
-		end
-		ims=torch.reshape(ims,(r-i+1)*10,3,224,224);
-		for j=1,nrepeat do
-			net:forward(ims);
-			--fc7 in vgg19 seems to be layer 43.
-			local tmp=net.modules[43].output:double();
-			tmp=torch.reshape(tmp,r-i+1,10,ndims);
-			fvs_ims[{{i,r},j,{},{}}]=tmp;
-		end
-		collectgarbage();
-	end
+	local t_im=timer:time().real;
+	--Do a forward
+	net:forward(ims:cuda());
+	--fc7 in vgg19 seems to be layer 43.
+	fvs[{{i,r},{}}]=net.modules[2].modules[43].output:double();
+	collectgarbage();
+	print(string.format('%d/%d,\ttime %f\t%f',r,nim,t_im,timer:time().real));
 end
 
-for i=1,sz do
-	list_of_images[list_im_names[i]]=i;
-end
-
-torch.save(params.output,{fvs=fvs_ims,list_of_images=list_of_images,ims=list_im_names,mode=params.mode,nrepeat=nrepeat,dropout=params.dropout});
-
+torch.save(params.output,{fvs=fvs,imname=imnames,lookup=imlookup});
 

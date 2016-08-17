@@ -1,76 +1,58 @@
-import json
-
-def loadjson(filename):
-	f=open(filename,'r');
+#generate dictionary;
+#generate question and answer string encodings;
+#generate multiple choice label;
+import json;
+def loadJson(fname):
+	f=open(fname,'r');
 	data=json.load(f);
 	f.close();
 	return data;
 
-
-def savejson(data,filename):
-	f=open(filename,'w');
+def saveJson(fname,data):
+	f=open(fname,'w');
 	json.dump(data,f);
 	f.close();
 
 
-train_captions=loadjson('./annotations/captions_train2014.json');
-train_images=loadjson('./annotations/instances_train2014.json');
-val_captions=loadjson('./annotations/captions_val2014.json');
-val_images=loadjson('./annotations/instances_val2014.json');
+train_captions=loadJson('./annotations/captions_train2014.json');
+train_captions['dataset']='train2014';
+val_captions=loadJson('./annotations/captions_val2014.json');
+val_captions['dataset']='val2014';
 
-ims_id=dict();
-for i in train_images['images']:
-	ims_id[i['id']]='train2014/'+i['file_name'];
-
-for i in val_images['images']:
-	ims_id[i['id']]='val2014/'+i['file_name'];
-
-#captions are first come, first served
-captions_id=dict();
-for i in train_captions['annotations']:
-	if not (i['image_id'] in captions_id):
-		captions_id[i['image_id']]=list();
-	
-	captions_id[i['image_id']].append(i['caption']);
-
-for i in val_captions['annotations']:
-	if not (i['image_id'] in captions_id):
-		captions_id[i['image_id']]=list();
-	
-	captions_id[i['image_id']].append(i['caption']);
-
-ims=list();
-for i in ims_id:
-	ims.append(ims_id[i]);
-
-captions=list();
-for i in ims_id:
-	captions.append(captions_id[i]);
-
-#tokenize
-
+import re
 import nltk
+def tokenize_nltk(sentence):
+	return nltk.word_tokenize(sentence);
+	#return [i for i in re.split(r"([-.\"',:? !\$#@~()*&\^%;\[\]/\\\+<>\n=])", sentence) if i!='' and i!=' ' and i!='\n'];
 
-words=dict();
-for i in captions:
-	for j in i:
-		for k in nltk.word_tokenize(j):
-			if not (k in words):
-				words[k]=1;
-			else:
-				words[k]=words[k]+1;
 
-words_sorted=sorted(words.items(),key=lambda x:x[1],reverse=True);
 
-words=[i[0] for i in words_sorted];
-lookup=dict(zip(words,range(0,len(words))));
-caption_tokens=list();
-for i in captions:
-	tmp1=list();
-	for j in i:
-		tmp2=[lookup[k] for k in nltk.word_tokenize(j)];
-		tmp1.append(tmp2);
+def dataset(annotations,tokenizer):
+	d=dict();
+	for cap in annotations['annotations']:
+		imname='%s/COCO_%s_%012d.jpg'%(annotations['dataset'],annotations['dataset'],cap['image_id']);
+		if not (imname in d):
+			d[imname]=list();
+		
+		d[imname].append((tokenizer(cap['caption']),cap['id']));
 	
-	caption_tokens.append(tmp1);
+	imnames=list();
+	caption=list();
+	caption_id=list();
+	for k in d:
+		imnames.append(k);
+		caption.append([c[0] for c in d[k]]);
+		caption_id.append([c[1] for c in d[k]]);
+	
+	return {'imname':imnames,'caption':caption,'caption_id':caption_id};
 
-savejson({'captions':captions,'caption_tokens':caption_tokens,'words':words,'lookup':lookup,"ims":ims},'captions.json');
+def merge(dataset1,dataset2):
+	d=dict();
+	for k in dataset1:
+		d[k]=dataset1[k]+dataset2[k];
+	
+	return d;
+
+dataset_train=dataset(train_captions,tokenize_nltk);
+dataset_val=dataset(val_captions,tokenize_nltk);
+saveJson('captions.json',merge(dataset_train,dataset_val));

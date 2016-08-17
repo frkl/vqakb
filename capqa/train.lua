@@ -1,191 +1,250 @@
 cmd = torch.CmdLine();
-cmd:text('Train a Caption-QA model');
-cmd:text('Options')
+cmd:text('Train a VQA-Caption model');
+cmd:text('Dataset')
 cmd:option('-data','../dataset/capqa/dataset_train.t7','Dataset for training');
-cmd:option('-model','model/lstm_bow.t7','Model filename');
-cmd:text();
+cmd:option('-data_test','../dataset/capqa/dataset_val.t7','Dataset for validation, it\'s nice to directly evaluate accuracy on the fly');
+
+cmd:text('Model parameters');
+cmd:option('-nanswers',1000,'Number of most frequent answers to use');
 cmd:option('-nhword',200,'Word embedding size');
 cmd:option('-nh',512,'RNN size');
 cmd:option('-nlayers',2,'RNN layers');
+cmd:option('-nhbow',1000,'Bag of words size for captions');
 cmd:option('-nhcommon',1024,'Common embedding size');
-cmd:option('-top',1000,'Bag of top N words');
-cmd:text();
-cmd:option('-batch',500,'Batch size (Adjust base on GRAM)');
+
+cmd:text('Optimization parameters');
+cmd:option('-batch',500,'Batch size (Adjust base on GRAM and dataset size)');
 cmd:option('-lr',3e-4,'Learning rate');
+cmd:option('-decay',150,'Learning rate decay in epochs');
 cmd:option('-epochs',300,'Epochs');
-cmd:option('-lr_decay',200,'After lr_decay epochs lr reduces to 0.1*lr');
-cmd:option('-vt',false,'Internal GPULock.')
 params=cmd:parse(arg);
---print(params)
-
-nhword=params.nhword;
-nh=params.nh;
-nlayers=params.nlayers;
-nhcommon=params.nhcommon;
-nhsent=nlayers*nh*2;
-nhcap=params.top;
-
-batch_size=params.batch;
-learning_rate=params.lr;
-nepochs=params.epochs;
-nepochs_lr_10decay=params.lr_decay;
-
-
-dataset_path=params.data;  
-model_path=params.model; 
-paths.mkdir('model/save');
 
 require 'nn'
 require 'cutorch'
-require 'cunn'
+require 'cunn' 
 require 'nngraph'
-require 'optim'
-require '../utils/optim_updates'
-require '../utils/RNNUtils'
-LSTM=require('../utils/LSTM');
+require 'optim_updates'
+RNN=require('word_RNN');
+require 'utils'
 
---GPU Lock
-if params.vt then
-	vtutils=require('vtutils');
-	id=vtutils.obtain_gpu_lock_id.get_id();
-	print(id);
-	cutorch.setDevice(id+1);
-end
 
 print('Loading dataset');
-dataset=torch.load(dataset_path);
-vocabulary_size_q=table.getn(dataset['question_dictionary']);
-vocabulary_size_cap=table.getn(dataset['caption_dictionary']);
-noutput=table.getn(dataset['answer_dictionary']);
-
-print('Right aligning words');
-dataset['question_lengths']=sequence_length(dataset['question_tokens']);
-dataset['question_tokens']=right_align(dataset['question_tokens'],dataset['question_lengths']);
-collectgarbage();
-
-print('Computing BoW');
-dataset['caption_lengths']=sequence_length(dataset['caption_tokens']);
-dataset['bow_cap']=bag_of_words(dataset['caption_tokens'],dataset['caption_lengths'],nhcap);
-collectgarbage();
-
-print('Initializing models');
-nhdummy=1;
---Network definitions
-embedding_net_q=nn.Sequential():add(nn.Linear(vocabulary_size_q,nhword)):add(nn.Dropout(0.5)):add(nn.Tanh()):cuda();
-encoder_net_q=LSTM.lstm(nhword,nh,nhdummy,nlayers,0.5):cuda();
-function AxB_bow(nhA,nhB,nhcommon,dropout)
-	dropout = dropout or 0 
-	local q=nn.Identity()();
-	local i=nn.Identity()();
-	local it=nn.ReLU()(nn.Linear(nhB,nhB)(i));
-	local qc=nn.Tanh()(nn.Linear(nhA,nhcommon)(nn.Dropout(dropout)(q)));
-	local ic=nn.Tanh()(nn.Linear(nhB,nhcommon)(nn.Dropout(dropout)(it)));
-	local output=nn.CMulTable()({qc,ic});
-	return nn.gModule({q,i},{output});
+function sequence_length(seq)
+	local v=seq:gt(0):long():sum(2):view(-1):long();
+	return v;
 end
-multimodal_net=nn.Sequential():add(AxB_bow(nhsent,nhcap,nhcommon,0.5)):add(nn.Dropout(0.5)):add(nn.Linear(nhcommon,noutput)):cuda();
---criterion
-criterion=nn.CrossEntropyCriterion():cuda();
---weights
-embedding_w_q,embedding_dw_q=embedding_net_q:getParameters();
-embedding_w_q:uniform(-0.08, 0.08);
-encoder_w_q,encoder_dw_q=encoder_net_q:getParameters();
-encoder_w_q:uniform(-0.08, 0.08);
-multimodal_w,multimodal_dw=multimodal_net:getParameters();
-multimodal_w:uniform(-0.08, 0.08);
---Create dummies so the originals are not contaminated with inputs/outputs during training.
-embedding_net_q_dummy=embedding_net_q:clone('weight','bias','gradWeight','gradBias');
-multimodal_net_dummy=multimodal_net:clone('weight','bias','gradWeight','gradBias');
-encoder_net_buffer_q=dupe_rnn(encoder_net_q,dataset['question_tokens']:size(2));
---Create dummy gradients
-dummy_state_q=torch.DoubleTensor(nhsent):fill(0):cuda();
-dummy_output_q=torch.DoubleTensor(nhdummy):fill(0):cuda();
+dataset=torch.load(params.data);
+dataset.question.tokens,params.question_dictionary=encode_sents(dataset.question.question);
+dataset.question.question=nil;
+collectgarbage();
+dataset.question.labels,params.answer_dictionary=encode_sents(dataset.question.answer,nil,params.nanswers);
+dataset.question.answer=nil;
+collectgarbage();
+dataset.caption.bow,params.caption_dictionary,dataset.caption.indicator=bow_sents3(dataset.caption.caption,nil,params.nhbow);
+dataset.caption.caption=nil;
+collectgarbage();
 
---Optimization parameters
-print('Setting up optimization');
-niter_per_epoch=math.ceil(dataset['question_tokens']:size(1)/batch_size);
-print(string.format('%d iter per epoch.',niter_per_epoch));
-opt_encoder={};
-opt_encoder.maxIter=nepochs*niter_per_epoch;
-opt_encoder.learningRate=learning_rate;
-opt_encoder.decay=math.exp(math.log(0.1)/nepochs_lr_10decay/niter_per_epoch);
-opt_embedding={};
-opt_embedding.maxIter=nepochs*niter_per_epoch;
-opt_embedding.learningRate=learning_rate;
-opt_embedding.decay=math.exp(math.log(0.1)/nepochs_lr_10decay/niter_per_epoch);
-opt_multimodal={};
-opt_multimodal.maxIter=nepochs*niter_per_epoch;
-opt_multimodal.learningRate=learning_rate;
-opt_multimodal.decay=math.exp(math.log(0.1)/nepochs_lr_10decay/niter_per_epoch);
+params.nhsent=params.nh*params.nlayers*2; --Using both cell and hidden of LSTM
+params.noutput=params.nanswers;
+params.nhoutput=1;
+
+dataset_test=torch.load(params.data_test);
+dataset_test.question.tokens,_=encode_sents(dataset_test.question.question,params.question_dictionary);
+dataset_test.question.question=nil;
+collectgarbage();
+dataset_test.question.labels,_=encode_sents(dataset_test.question.answer,params.answer_dictionary,params.nanswers);
+dataset_test.question.answer=nil;
+collectgarbage();
+dataset_test.caption.bow,_,dataset_test.caption.indicator=bow_sents3(dataset_test.caption.caption,params.caption_dictionary,params.nhbow);
+dataset_test.caption.caption=nil;
+collectgarbage();
+
+
+
+print('Initializing session');
+paths.mkdir('sessions')
+Session=require('session_manager');
+session=Session:init('./sessions');
+basedir=session:new(params);
+paths.mkdir(paths.concat(basedir,'model'));
+log_file=paths.concat(basedir,string.format('log.txt',1));
+function Log(msg)
+	local f = io.open(log_file, "a")
+	print(msg);
+	f:write(msg..'\n');
+	f:close()
+end
+
+
+--Network definitions
+Log('Initializing models');
+
+function wrap_net(net,gpu)
+	local d={};
+	if gpu then
+		d.net=net:cuda();
+	else
+		d.net=net;
+	end
+	d.w,d.dw=d.net:getParameters();
+	d.deploy=d.net:clone('weight','bias','gradWeight','gradBias','running_mean','running_std','running_var');
+	return d;
+end
+function VQA_PW(nhA,nhB,nhcommon,noutput)
+	local q=nn.Identity()();
+	local c=nn.Identity()();
+	local qc=nn.Tanh()(nn.Linear(nhA,nhcommon)(nn.Dropout(0.5)(q)));
+	local cc=nn.Tanh()(nn.Linear(nhB,nhcommon)(c));
+	local output=nn.Linear(nhcommon,noutput)(nn.Dropout(0.5)(nn.CMulTable()({qc,cc})));
+	return nn.gModule({q,c},{output});
+end
+Q_embedding_net=wrap_net(nn.Sequential():add(nn.LookupTable(table.getn(params.question_dictionary)+1,params.nhword)):add(nn.Dropout(0.5)),true);
+Q_embedding_net.w:uniform(-0.0001,0.0001); --initialize with sth small, so that UNK is small.
+Q_encoder_net=RNN:new(RNN.unit.lstm(params.nhword,params.nh,params.nhoutput,params.nlayers,0.5),math.max(dataset.question.tokens:size(2),dataset_test.question.tokens:size(2)),true);
+multimodal_net=wrap_net(VQA_PW(params.nhsent,params.nhbow,params.nhcommon,params.noutput),true);
+--Criterion
+criterion=nn.CrossEntropyCriterion():cuda();
+--Create dummy states and gradients
+dummy_state=torch.DoubleTensor(params.nhsent):fill(0):cuda();
+dummy_output=torch.DoubleTensor(params.nhoutput):fill(0):cuda();
+
+
+--Optimization
+Log('Setting up optimization');
+niter_per_epoch=math.ceil(dataset.question.tokens:size(1)/params.batch);
+max_iter=params.epochs*niter_per_epoch;
+Log(string.format('%d iter per epoch.',niter_per_epoch));
+decay=math.exp(math.log(0.1)/params.decay/niter_per_epoch);
+opt_encoder_Q={learningRate=params.lr,decay=decay};
+opt_embedding_Q={learningRate=params.lr,decay=decay};
+opt_multimodal={learningRate=params.lr,decay=decay};
+Q_encoder_net:training();
+Q_embedding_net.deploy:training();
+multimodal_net.deploy:training();
 
 --Batch function
-function dataset:next_batch_train()
+function dataset:batch_train(batch_size)
 	local timer = torch.Timer();
-	local nqs=dataset['question_tokens']:size(1);
+	local nqs=self.question.tokens:size(1);
 	local qinds=torch.LongTensor(batch_size):fill(0);
-	local capinds=torch.LongTensor(batch_size):fill(0);
+	local labels=torch.LongTensor(batch_size):fill(0);
+	local bow_cap=torch.DoubleTensor(batch_size,params.nhbow):fill(0);
 	for i=1,batch_size do
-		qinds[i]=torch.random(nqs);
-		capinds[i]=(dataset['question_imids'][qinds[i]]-1)*dataset['ncaptions_per_im']+torch.random(dataset['ncaptions_per_im']);
+		while true do
+			qinds[i]=torch.random(nqs);
+			local imname=self.question.imname[qinds[i]];
+			local ind=self.caption.lookup[imname];
+			local ncaps=self.caption.indicator[ind]:sum();
+			local answer_ind=self.question.labels[qinds[i]]:le(params.nanswers);
+			if ncaps>0 and answer_ind:long():sum()>0 then
+				local answer_id=torch.range(1,self.question.labels:size(2))[self.question.labels[qinds[i]]:le(params.nanswers)]:long();
+				bow_cap[i]=self.caption.bow[ind][torch.random(ncaps)];
+				labels[i]=self.question.labels[qinds[i]][answer_id[torch.random(answer_id:size(1))]];
+				break;
+			end
+		end
 	end
-	local fv_sorted_q=sort_encoding_onehot_right_align(dataset['question_tokens']:index(1,qinds),dataset['question_lengths']:index(1,qinds),vocabulary_size_q);
-	fv_sorted_q.onehot=fv_sorted_q.onehot:cuda();
-	fv_sorted_q.map_to_rnn=fv_sorted_q.map_to_rnn:cuda();
-	fv_sorted_q.map_to_sequence=fv_sorted_q.map_to_sequence:cuda();
-	local fv_cap=dataset['bow_cap']:index(1,capinds);
-	local labels=dataset['answer_labels']:index(1,qinds);
-	return fv_sorted_q,fv_cap:cuda(),labels:cuda(),batch_size;
+	local fv_sorted_q=sort_by_length_left_aligned(self.question.tokens:index(1,qinds),true);
+	return fv_sorted_q,bow_cap:cuda(),labels:cuda();
 end
-
+function dataset_test:batch_eval(s,e)
+	local timer = torch.Timer();
+	local batch_size=e-s+1;
+	local qinds=torch.LongTensor(batch_size):fill(0);
+	local bow_cap=torch.DoubleTensor(batch_size,params.nhbow):fill(0);
+	for i=1,batch_size do
+		qinds[i]=s+i-1;
+		local imname=self.question.imname[qinds[i]];
+		local ind=self.caption.lookup[imname];
+		bow_cap[i]=self.caption.bow[ind][1];
+	end
+	local fv_sorted_q=sort_by_length_left_aligned(self.question.tokens:index(1,qinds),true);
+	return fv_sorted_q,bow_cap:cuda();
+end
 --Objective function
-running_avg=0;
+running_avg=nil;
 function ForwardBackward()
 	local timer = torch.Timer();
 	--clear gradients--
-	encoder_dw_q:zero();
-	embedding_dw_q:zero();
-	multimodal_dw:zero();
-	--grab a batch--
-	local fv_sorted_q,fv_cap,labels,batch_size=dataset:next_batch_train();
-	local question_max_length=fv_sorted_q.batch_sizes:size(1);
-	--embedding forward--
-	local word_embedding_q=embedding_net_q:forward(fv_sorted_q.onehot);
-	--encoder forward--
-	local states_q,_=rnn_forward(encoder_net_buffer_q,torch.repeatTensor(dummy_state_q:fill(0),batch_size,1),word_embedding_q,fv_sorted_q.batch_sizes);
-	--multimodal/criterion forward--
-	local tv_q=states_q[question_max_length+1]:index(1,fv_sorted_q.map_to_sequence);
-	local scores=multimodal_net:forward({tv_q,fv_cap});
+	Q_embedding_net.dw:zero();
+	Q_encoder_net.dw:zero();
+	multimodal_net.dw:zero();
+	--Grab a batch--
+	local fv_Q,bow_C,labels=dataset:batch_train(params.batch);
+	--Forward/backward
+	local embedding_Q=Q_embedding_net.deploy:forward(fv_Q.words);
+	local state_Q,_=Q_encoder_net:forward(torch.repeatTensor(dummy_state:fill(0),fv_Q.map_to_sequence:size(1),1),embedding_Q,fv_Q.batch_sizes);
+	local tv_Q=state_Q:index(1,fv_Q.map_to_sequence);
+	local scores=multimodal_net.deploy:forward({tv_Q,bow_C});
 	local f=criterion:forward(scores,labels);
-	--multimodal/criterion backward--
+	
 	local dscores=criterion:backward(scores,labels);
-	local tmp=multimodal_net:backward({tv_q,fv_cap},dscores);
-	local dtv_q=tmp[1]:index(1,fv_sorted_q.map_to_rnn);
-	--encoder backward
-	local _,dword_embedding_q=rnn_backward(encoder_net_buffer_q,dtv_q,dummy_output_q,states_q,word_embedding_q,fv_sorted_q.batch_sizes);
-	--embedding backward--
-	embedding_net_q:backward(fv_sorted_q.onehot,dword_embedding_q);
-	--summarize f and gradient
-	encoder_dw_q:clamp(-10,10);
-	running_avg=running_avg*0.95+f*0.05;
+	local tmp=multimodal_net.deploy:backward({tv_Q,bow_C},dscores);
+	local dstate_Q=tmp[1]:index(1,fv_Q.map_to_rnn);
+	local _,dembedding_Q=Q_encoder_net:backward(torch.repeatTensor(dummy_state:fill(0),params.batch,1),embedding_Q,fv_Q.batch_sizes,dstate_Q,dummy_output);
+	Q_embedding_net.deploy:backward(fv_Q.words,dembedding_Q);
+	
+	Q_encoder_net.dw:clamp(-5,5);
+	if running_avg then
+		running_avg=running_avg*0.95+f*0.05;
+	else
+		running_avg=f;
+	end
+end
+function Forward_test(s,e)
+	local fv_Q,bow_C=dataset_test:batch_eval(s,e);
+	--Forward
+	local embedding_Q=Q_embedding_net.deploy:forward(fv_Q.words);
+	local state_Q,_=Q_encoder_net:forward(torch.repeatTensor(dummy_state:fill(0),fv_Q.map_to_sequence:size(1),1),embedding_Q,fv_Q.batch_sizes);
+	local tv_Q=state_Q:index(1,fv_Q.map_to_sequence);
+	local scores=multimodal_net.deploy:forward({tv_Q,bow_C});
+	return scores;
 end
 
 --Optimization loop
-print('Begin optimizing');
+Log('Begin optimizing');
 local timer = torch.Timer();
-for i=1,opt_encoder.maxIter do
-	if i%(niter_per_epoch*10)==0 then
-		torch.save(string.format('model/save/lstm_bow_save_epoch%d.t7',i/(niter_per_epoch)),{encoder_net_q=encoder_net_q,embedding_net_q=embedding_net_q,multimodal_net=multimodal_net,nhword=nhword,nh=nh,nhsent=nhsent,nhcommon=nhcommon,nlayers=nlayers,nhcap=nhcap,noutput=noutput});
-	end
+for i=1,max_iter do
+	--Print statistics every 1 epoch
 	if i%niter_per_epoch==0 then
-		print(string.format('epoch %d/%d, trainloss %f, learning rate %f, time %f',i/niter_per_epoch,nepochs,running_avg,opt_encoder.learningRate,timer:time().real));
+		Log(string.format('epoch %d/%d, trainloss %f, learning rate %f, time %f',i/niter_per_epoch,params.epochs,running_avg,opt_encoder_Q.learningRate,timer:time().real));
+	end
+	--Save every 10 epochs
+	if i%(niter_per_epoch*10)==0 then
+		torch.save(paths.concat(basedir,'model',string.format('model_epoch%d.t7',i/(niter_per_epoch))),{Q_encoder_net=Q_encoder_net.net,Q_embedding_net=Q_embedding_net.net,multimodal_net=multimodal_net.net});
+		--do some testing here
+		Q_encoder_net:evaluate();
+		Q_embedding_net.deploy:evaluate();
+		multimodal_net.deploy:evaluate();
+		local npts_test=dataset_test.question.tokens:size(1);
+		local pred_test=torch.zeros(npts_test):long();
+		for i=1,npts_test,params.batch do
+			--print(string.format('\ttesting %d/%d %f',i,npts_test,timer:time().real));
+			local r=math.min(i+params.batch-1,npts_test);
+			local score=Forward_test(i,r):double();
+			--predict
+			_,pred_test[{{i,r}}]=torch.max(score,2);
+		end
+		local correct_count=torch.repeatTensor(pred_test:view(-1,1),1,dataset_test.question.labels:size(2)):eq(dataset_test.question.labels):double():sum(2);
+		correct_count[correct_count:gt(3)]=3;
+		local acc_test=correct_count:mean()/3;
+		Log(string.format('test acc:%f',acc_test));
+		Q_encoder_net:training();
+		Q_embedding_net.deploy:training();
+		multimodal_net.deploy:training();
+	end
+	--Collect garbage every 10 iterations
+	if i%10==0 then
+		collectgarbage();
 	end
 	ForwardBackward();
-	rmsprop(encoder_w_q,encoder_dw_q, opt_encoder);
-	rmsprop(embedding_w_q,embedding_dw_q, opt_embedding);
-	rmsprop(multimodal_w,multimodal_dw, opt_multimodal);
-	opt_encoder.learningRate=opt_encoder.learningRate*opt_encoder.decay;
-	opt_embedding.learningRate=opt_embedding.learningRate*opt_embedding.decay;
+	--Update parameters
+	rmsprop(Q_encoder_net.w,Q_encoder_net.dw,opt_encoder_Q);
+	rmsprop(Q_embedding_net.w,Q_embedding_net.dw,opt_embedding_Q);
+	rmsprop(multimodal_net.w,multimodal_net.dw,opt_multimodal);
+	--Learning rate decay
+	opt_encoder_Q.learningRate=opt_encoder_Q.learningRate*opt_encoder_Q.decay;
+	opt_embedding_Q.learningRate=opt_embedding_Q.learningRate*opt_embedding_Q.decay;
 	opt_multimodal.learningRate=opt_multimodal.learningRate*opt_multimodal.decay;
+	
 end
-print('Save model');
-torch.save(model_path,{encoder_net_q=encoder_net_q,embedding_net_q=embedding_net_q,multimodal_net=multimodal_net,nhword=nhword,nh=nh,nhsent=nhsent,nhcommon=nhcommon,nlayers=nlayers,nhcap=nhcap,noutput=noutput});
