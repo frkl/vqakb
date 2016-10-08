@@ -22,9 +22,9 @@ require 'nn'
 require 'cutorch'
 require 'cunn' 
 require 'nngraph'
-require 'optim_updates'
-RNN=require('word_RNN');
-require 'utils'
+require '../utils/optim_updates'
+RNN=require('../utils/word_RNN');
+require '../utils/utils'
 
 
 print('Loading dataset');
@@ -57,7 +57,7 @@ collectgarbage();
 
 print('Initializing session');
 paths.mkdir('sessions')
-Session=require('session_manager');
+Session=require('../utils/session_manager');
 session=Session:init('./sessions');
 basedir=session:new(params);
 paths.mkdir(paths.concat(basedir,'model'));
