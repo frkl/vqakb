@@ -59,10 +59,11 @@ function rmsprop(x, dx, state)
   x:addcdiv(-learningRate, dx, state.tmp)
 end
 
-function adam(x, dx, lr, beta1, beta2, epsilon, state)
-  local beta1 = beta1 or 0.9
-  local beta2 = beta2 or 0.999
-  local epsilon = epsilon or 1e-8
+function adam(x, dx, state)
+  local beta1 = state.beta1 or 0.9
+  local beta2 = state.beta2 or 0.999
+  local epsilon = state.epsilon or 1e-8
+  local learningRate=state.learningRate or 0.001
 
   if not state.m then
     -- Initialization
@@ -83,7 +84,7 @@ function adam(x, dx, lr, beta1, beta2, epsilon, state)
   state.t = state.t + 1
   local biasCorrection1 = 1 - beta1^state.t
   local biasCorrection2 = 1 - beta2^state.t
-  local stepSize = lr * math.sqrt(biasCorrection2)/biasCorrection1
+  local stepSize = learningRate * math.sqrt(biasCorrection2)/biasCorrection1
   
   -- perform update
   x:addcdiv(-stepSize, state.m, state.tmp)
